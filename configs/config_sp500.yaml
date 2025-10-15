@@ -1,0 +1,6 @@
+﻿universe: SP500
+start: 2011-01-01
+end: null     # T-1
+min_history_days: 252
+price_cache_days: 1
+window_days: 252

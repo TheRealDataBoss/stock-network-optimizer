@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+# Notebooks
+.ipynb_checkpoints/
+# Data & artifacts (use LFS/DVC if needed)
+data/
+artifacts/
+content/stock_net_artifacts/
+# OS/IDE
+.DS_Store
+.vscode/
