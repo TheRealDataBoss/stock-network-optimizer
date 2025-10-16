@@ -1,0 +1,22 @@
+﻿name: Auto Setup
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize Repo Scaffolds
+        run: |
+          mkdir -p artifacts/predictions/SP500 artifacts/predictions/DOW30 artifacts/predictions/NASDAQ100 artifacts/truth configs docs
+          echo '# Model History & Evaluation Framework' > docs/ARCHITECTURE.md
+          echo '__pycache__/' > .gitignore
+          echo 'created scaffolds' > README.md
+          git add .
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git commit -m "auto setup scaffolds" || echo "No changes"
+          git push
