@@ -33,6 +33,6 @@ jobs:
         run: |
           git config user.name  "github-actions"
           git config user.email "actions@github.com"
-          git add artifacts docs
+          git add -f artifacts docs
           git commit -m "tracker: update metrics + charts" || echo "no changes"
           git push
