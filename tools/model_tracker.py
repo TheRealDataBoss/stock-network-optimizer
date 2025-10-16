@@ -1,111 +1,153 @@
-﻿import os, glob, datetime as dt
-import numpy as np, pandas as pd, plotly.express as px
-from google.cloud import bigquery
-import yfinance as yf
+import os, glob, io, json, datetime as dt
+import pandas as pd
+import numpy as np
+from pathlib import Path
 
-PROJECT  = os.environ["GCP_PROJECT_ID"]
-DATASET  = os.environ["BQ_DATASET"]
-ART_BASE = "artifacts"
-DOCS_DIR = "docs"
+# Optional BigQuery
+USE_BQ = all(k in os.environ for k in ["GOOGLE_APPLICATION_CREDENTIALS","GCP_PROJECT_ID","BQ_DATASET"])
+if USE_BQ:
+    from google.cloud import bigquery
 
-PRED_DIRS = [f"{ART_BASE}/predictions/SP500",
-             f"{ART_BASE}/predictions/DOW30",
-             f"{ART_BASE}/predictions/NASDAQ100"]
+REPO_ROOT = Path(__file__).resolve().parents[1]
+ART_DIR   = REPO_ROOT / "artifacts"
+DOCS_DIR  = REPO_ROOT / "docs"
+DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
-METRICS_PQ = f"{ART_BASE}/metrics/model_performance_history.parquet"
+TODAY = dt.date.today()
+RUN_TS = pd.Timestamp.utcnow()
 
-os.makedirs(os.path.dirname(METRICS_PQ), exist_ok=True)
-os.makedirs(DOCS_DIR, exist_ok=True)
-
-bq = bigquery.Client(project=PROJECT)
+def _col(df, candidates):
+    for c in candidates:
+        if c in df.columns: return c
+    # try index
+    if df.index.name in candidates: return df.index.name
+    # try after reset_index
+    tmp = df.reset_index()
+    for c in candidates:
+        if c in tmp.columns: return c
+    raise KeyError(f"None of {candidates} found in columns {list(df.columns)} (index: {df.index.name})")
 
 def load_predictions():
-    frames=[]
-    for d in PRED_DIRS:
-        uni = d.split("/")[-1]
-        for f in glob.glob(f"{d}/*.csv"):
-            df = pd.read_csv(f)
-            df["universe"]=uni
-            frames.append(df)
-    if not frames: return pd.DataFrame()
-    df=pd.concat(frames,ignore_index=True)
-    df["date"]=pd.to_datetime(df["date"]).dt.date
-    df["symbol"]=df["symbol"].str.replace(".","-").str.upper()
-    keep=["date","universe","symbol","pred_log_ret","model_name","version","run_timestamp"]
-    return df[keep]
+    files = glob.glob(str(ART_DIR / "predictions" / "**" / "*.csv"), recursive=True)
+    if not files: return pd.DataFrame()
+    dfs = []
+    for f in files:
+        df = pd.read_csv(f)
+        # normalize columns
+        dcol = _col(df, ["date","Date"])
+        scol = _col(df, ["symbol","Symbol","ticker","Ticker"])
+        df["date"]   = pd.to_datetime(df[dcol]).dt.date
+        df["symbol"] = df[scol].str.upper()
+        # universe from path (e.g., artifacts/predictions/SP500/xxxx.csv)
+        parts = Path(f).parts
+        uni = "UNKNOWN"
+        if "predictions" in parts:
+            i = parts.index("predictions")
+            if i+1 < len(parts): uni = parts[i+1]
+        df["universe"] = uni
+        # prediction value
+        if "pred_log_ret" not in df.columns:
+            # fallback: any of these?
+            for c in ["pred","pred_ret","predicted","y_hat","y_pred"]:
+                if c in df.columns:
+                    df["pred_log_ret"] = df[c].astype(float)
+                    break
+        if "pred_log_ret" not in df.columns:
+            raise ValueError(f"{f} missing pred_log_ret")
+        # meta
+        if "model_name" not in df.columns: df["model_name"] = "baseline"
+        if "version"    not in df.columns: df["version"]    = "v1"
+        if "run_timestamp" not in df.columns: df["run_timestamp"] = RUN_TS
+        dfs.append(df[["date","universe","symbol","pred_log_ret","model_name","version","run_timestamp"]])
+    out = pd.concat(dfs, ignore_index=True).dropna(subset=["date","symbol","pred_log_ret"])
+    return out
 
-def truth_for(symbols, start):
-    tick=" ".join(symbols)
-    px=yf.download(tickers=tick, start=start, auto_adjust=True, threads=True, progress=False)
-    if isinstance(px.columns, pd.MultiIndex): px=px["Close"]
-    px=px.sort_index()
-    lr=np.log(px).diff().dropna()
-    lr.index=lr.index.date
-    return lr
+def compute_truth(pred):
+    # build minimal daily truth from Yahoo closes and next-day returns for the prediction dates window
+    try:
+        import yfinance as yf
+    except Exception as e:
+        raise RuntimeError("yfinance not available in runner") from e
 
-def load_to_bq(df, table):
-    if df.empty: return
-    bq.load_table_from_dataframe(df, f"{PROJECT}.{DATASET}.{table}").result()
+    syms = sorted(pred["symbol"].unique().tolist())
+    if not syms: return pd.DataFrame()
 
-def append_parquet(df, path):
-    if df.empty: return
-    if os.path.exists(path):
-        old=pd.read_parquet(path)
-        df=pd.concat([old,df],ignore_index=True).drop_duplicates()
-    df.to_parquet(path,index=False)
+    lo = pred["date"].min() - pd.Timedelta(days=5)
+    hi = pred["date"].max() + pd.Timedelta(days=5)
+    px = yf.download(syms, start=str(lo), end=str(hi), auto_adjust=True, progress=False)
 
-def compute_metrics(preds, truth):
-    m = preds.merge(truth.stack().rename("log_ret").reset_index().rename(columns={"level_1":"symbol"}),
-                    on=["date","symbol"], how="inner")
-    if m.empty: return pd.DataFrame()
-    m["hit"] = np.sign(m["pred_log_ret"]) == np.sign(m["log_ret"])
-    out=[]
-    today=dt.date.today()
-    for (u,mn,v), g in m.groupby(["universe","model_name","version"]):
-        g=g.sort_values("date")
-        rmse=np.sqrt(((g["pred_log_ret"]-g["log_ret"])**2).mean())
-        mape=(np.abs((g["log_ret"]-g["pred_log_ret"])/(g["log_ret"].replace(0,np.nan))).dropna()).mean()
-        corr=g[["pred_log_ret","log_ret"]].corr().iloc[0,1]
-        da=g["hit"].mean()
-        s_lr=g.groupby("date")["log_ret"].mean()
-        mu, sig = s_lr.mean()*252, s_lr.std(ddof=1)*np.sqrt(252)
-        rsh = mu/sig if sig>0 else np.nan
-        p_lr=g.groupby("date")["pred_log_ret"].mean()
-        pm, ps = p_lr.mean()*252, p_lr.std(ddof=1)*np.sqrt(252)
-        psh = pm/ps if ps>0 else np.nan
-        out.append(dict(run_date=today,universe=u,model_name=mn or "model",version=v or "v1",
-                        window_days=252,rmse=rmse,mape=mape,corr_pred_actual=corr,
-                        directional_accuracy=da,realized_sharpe=rsh,predicted_sharpe=psh))
-    return pd.DataFrame(out)
+    if isinstance(px.columns, pd.MultiIndex):
+        px = px["Close"].copy()
+    else:
+        # single symbol case
+        pass
+    px = px.sort_index()
+    px.index = pd.to_datetime(px.index).date
+
+    # wide to long
+    df = px.reset_index().melt(id_vars=["index"], var_name="symbol", value_name="close")
+    df = df.rename(columns={"index":"date"})
+    df["symbol"] = df["symbol"].astype(str).str.upper()
+    df = df.sort_values(["symbol","date"])
+    # log and arithmetic returns
+    df["log_ret"] = df.groupby("symbol")["close"].apply(lambda s: np.log(s).diff())
+    df["arith_ret"] = df.groupby("symbol")["close"].pct_change()
+    # keep only dates we have predictions on (same-day realized; downstream can align to T+1 if desired)
+    uni_map = pred[["symbol","universe"]].drop_duplicates()
+    out = df.merge(uni_map, on="symbol", how="left")
+    return out[["date","universe","symbol","log_ret","arith_ret","close"]].dropna(subset=["close"])
+
+def metric_hit_rate(pred, truth, horizon="same_day"):
+    # align on date & symbol; sign agreement as simple skill proxy
+    m = pred.merge(truth, on=["date","symbol","universe"], how="inner")
+    if m.empty:
+        return pd.DataFrame([{
+            "run_date": TODAY, "universe":"NA", "metric":"hit_rate", "value": np.nan,
+            "window": horizon, "run_timestamp": RUN_TS
+        }])
+    yhat = np.sign(m["pred_log_ret"].astype(float))
+    y    = np.sign(m["log_ret"].astype(float).fillna(0))
+    hit  = (yhat == y).mean()
+    return pd.DataFrame([{
+        "run_date": TODAY, "universe":"ALL", "metric":"hit_rate", "value": float(hit),
+        "window": horizon, "run_timestamp": RUN_TS
+    }])
+
+def write_bq(df, table):
+    client = bigquery.Client(project=os.environ["GCP_PROJECT_ID"])
+    table_id = f'{os.environ["GCP_PROJECT_ID"]}:{os.environ["BQ_DATASET"]}.{table}'
+    job = client.load_table_from_dataframe(df, table_id)
+    job.result()
+
+def write_html(metrics_df):
+    # Minimal HTML report
+    html = io.StringIO()
+    html.write("<html><head><meta charset='utf-8'><title>Model Skill Over Time</title></head><body>")
+    html.write(f"<h2>Run: {TODAY}</h2>")
+    html.write(metrics_df.to_html(index=False))
+    html.write("</body></html>")
+    (DOCS_DIR / "model_skill_over_time.html").write_text(html.getvalue(), encoding="utf-8")
 
 def main():
-    preds=load_predictions()
-    if preds.empty:
-        print("No predictions found."); return
-    syms=preds.groupby("universe")["symbol"].unique().to_dict()
-    start=preds["date"].min()
-    truth_list=[]
-    for u, arr in syms.items():
-        tr=truth_for(arr.tolist(),start=start)
-        tr=tr.stack().rename("log_ret").reset_index()
-        tr["date"]=pd.to_datetime(tr["Date"]).dt.date
-        tr=tr.rename(columns={"level_1":"symbol"})[["date","symbol","log_ret"]]
-        tr["universe"]=u
-        truth_list.append(tr[["date","universe","symbol","log_ret"]])
-    truth=pd.concat(truth_list,ignore_index=True)
+    pred = load_predictions()
+    if pred.empty:
+        raise SystemExit("No predictions found under artifacts/predictions/**.csv")
 
-    load_to_bq(preds, "predictions")
-    load_to_bq(truth, "truth")
+    truth = compute_truth(pred)
+    # metrics (extend later)
+    metrics = metric_hit_rate(pred, truth, horizon="same_day")
 
-    t_piv=truth.pivot_table(index="date",columns="symbol",values="log_ret")
-    metrics=compute_metrics(preds,t_piv)
-    load_to_bq(metrics,"metrics_history")
-    append_parquet(metrics, METRICS_PQ)
+    # Write artifacts
+    ART_DIR.mkdir(parents=True, exist_ok=True)
+    (ART_DIR / "predictions_parsed.parquet").write_bytes(pred.to_parquet(index=False))
+    (ART_DIR / "truth_parsed.parquet").write_bytes(truth.to_parquet(index=False))
+    write_html(metrics)
 
-    fig=px.line(metrics.sort_values("run_date"), x="run_date",
-                y=["rmse","corr_pred_actual","directional_accuracy"],
-                color="universe", title="Model Skill — RMSE / Corr / DA")
-    fig.write_html(f"{DOCS_DIR}/model_skill_over_time.html", include_plotlyjs="cdn")
+    # Write BigQuery if configured
+    if USE_BQ:
+        write_bq(pred,    "predictions")
+        write_bq(truth,   "truth")
+        write_bq(metrics, "metrics_history")
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
