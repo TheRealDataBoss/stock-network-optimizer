@@ -1,0 +1,3 @@
+﻿date,symbol,pred_log_ret,model_name,version,run_timestamp
+2025-10-15,AAPL,0.001,baseline,v1,2025-10-15T22:45:27
+2025-10-15,MSFT,0.0008,baseline,v1,2025-10-15T22:45:27
