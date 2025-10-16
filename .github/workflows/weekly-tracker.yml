@@ -26,7 +26,7 @@ jobs:
           echo $GCP_SA_KEY | base64 -d > sa.json
           echo "GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/sa.json" >> $GITHUB_ENV
           echo "GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
-          echo "BQ_DATASET=${{ secrets[BQ_DATASET] }}" >> $GITHUB_ENV
+          echo "BQ_DATASET=${{ secrets.BQ_DATASET }}" >> $GITHUB_ENV
       - name: Run tracker
         run: python tools/model_tracker.py
       - name: Commit artifacts
