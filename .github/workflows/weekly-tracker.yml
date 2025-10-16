@@ -1,0 +1,38 @@
+name: Weekly Model Tracker
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+jobs:
+  tracker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy pyarrow fastparquet yfinance google-cloud-bigquery google-auth plotly
+      - name: GCP auth
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          echo $GCP_SA_KEY | base64 -d > sa.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/sa.json" >> $GITHUB_ENV
+          echo "GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
+          echo "BQ_DATASET=${{ secrets[BQ_DATASET] }}" >> $GITHUB_ENV
+      - name: Run tracker
+        run: python tools/model_tracker.py
+      - name: Commit artifacts
+        run: |
+          git config user.name  "github-actions"
+          git config user.email "actions@github.com"
+          git add artifacts docs
+          git commit -m "tracker: update metrics + charts" || echo "no changes"
+          git push
