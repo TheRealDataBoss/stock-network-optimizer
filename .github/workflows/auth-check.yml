@@ -1,0 +1,30 @@
+﻿name: GCP Auth Check
+on: { workflow_dispatch: {} }
+
+jobs:
+  authcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_JSON }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+          install_components: 'bq'
+
+      - name: Verify auth
+        run: |
+          gcloud --version
+          bq version
+          echo "Active account:"
+          gcloud config list account
+          echo "WhoAmI:"
+          gcloud auth list
+          echo "Project:"
+          gcloud config list project
