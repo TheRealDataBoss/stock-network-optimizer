@@ -1,17 +1,16 @@
-# Python
-__pycache__/
+﻿__pycache__/
 *.pyc
-.venv/
+*.pyo
+*.pyd
+*.ipynb_checkpoints/
+artifacts/**/*
+!artifacts/.keep
 .env
-# Notebooks
-.ipynb_checkpoints/
-# Data & artifacts (use LFS/DVC if needed)
-data/
-artifacts/
-content/stock_net_artifacts/
-# OS/IDE
 .DS_Store
+<<<<<<< Updated upstream
 .vscode/
 # --- SNO generated outputs (allow) ---
 !artifacts/**
 !docs/**
+=======
+>>>>>>> Stashed changes
